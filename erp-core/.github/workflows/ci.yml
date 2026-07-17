@@ -1,0 +1,51 @@
+# Amal ERP Core — CI (Constitution Art. 9.1: automated lint, typecheck,
+# tests, build, migration check on every change; deploy happens from tags).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: amal
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: amal_erp_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U amal -d amal_erp_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://amal:ci_password@localhost:5432/amal_erp_ci?schema=public
+      JWT_ACCESS_SECRET: ci-only-access-secret-not-used-in-prod
+      JWT_REFRESH_SECRET: ci-only-refresh-secret-not-used-in-prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      # Migrations must apply cleanly from zero (Art. 3.6)
+      - run: npx prisma migrate deploy
+      - run: npm run lint --if-present
+      - run: npx tsc -p tsconfig.build.json --noEmit
+      - run: npm test
+      - run: npm run build
+      # Seed must be idempotent — run twice
+      - run: npm run prisma:seed && npm run prisma:seed
+
+  docker-image:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t amal-erp-core:${{ github.sha }} .

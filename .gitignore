@@ -1,0 +1,25 @@
+.DS_Store
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Prisma
+prisma/dev.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db

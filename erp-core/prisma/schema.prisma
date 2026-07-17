@@ -1,0 +1,1847 @@
+// Amal Foundation Platform - ERP Core
+// Phase 1: identity, authorization, audit, configuration
+// Phase 2: crm, storage, notification
+// Rules: tables snake_case (Constitution Art. 3.7); audit append-only (Art. 6.3);
+// no hard deletes of institutional data (Art. 4.4); provenance on channel records (Art. 4.3).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── identity ───────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+  LOCKED
+  ARCHIVED
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String?    @unique
+  phone        String?    @unique
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  // Real CRM relationship (Phase 2): a login account belongs to at most one Person.
+  personId     String?    @unique
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  person   Person?    @relation(fields: [personId], references: [id])
+  sessions Session[]
+  devices  Device[]
+  roles    UserRole[]
+
+  @@map("users")
+}
+
+model Session {
+  id               String    @id @default(uuid())
+  userId           String
+  refreshTokenHash String
+  ip               String?
+  userAgent        String?
+  deviceId         String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Device {
+  id         String   @id @default(uuid())
+  userId     String
+  platform   String?
+  name       String?
+  fcmToken   String?
+  lastSeenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("devices")
+}
+
+enum VerificationType {
+  EMAIL_VERIFY
+  PHONE_VERIFY
+  PASSWORD_RESET
+  MFA_OTP
+}
+
+model VerificationCode {
+  id         String           @id @default(uuid())
+  userId     String
+  type       VerificationType
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime         @default(now())
+
+  @@index([userId, type])
+  @@map("verification_codes")
+}
+
+// ───────────────────────── authorization ─────────────────────────
+
+model Role {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  description String?
+  isSystem    Boolean @default(false)
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid())
+  code        String  @unique // "<module>.<action>"
+  module      String
+  action      String
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+/// Row-level data scoping rules (ADR-016). Interpreted by module services.
+model ScopeRule {
+  id         String   @id @default(uuid())
+  userId     String
+  scopeType  String // GOVERNORATE | REGION | PROJECT | ASSIGNMENT | DEPARTMENT
+  scopeValue String
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@map("scope_rules")
+}
+
+// ─────────────────────────── audit ───────────────────────────
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  module     String
+  entityType String?
+  entityId   String?
+  oldValue   Json?
+  newValue   Json?
+  ip         String?
+  userAgent  String?
+  requestId  String?
+  createdAt  DateTime @default(now())
+
+  @@index([module, action])
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─────────────────────── configuration ───────────────────────
+
+model Setting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model FeatureFlag {
+  key         String   @id
+  enabled     Boolean  @default(false)
+  description String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+// ─────────────────────────── crm (Phase 2) ───────────────────────────
+// Person is the central entity of the platform (Core Domain Model v1).
+// ERP-mastered (Data Ownership Model §3). Never hard-deleted (Art. 4.4).
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum PersonStatus {
+  ACTIVE
+  ARCHIVED
+  MERGED
+}
+
+/// Provenance of channel-originated records (Data Ownership Model §5).
+enum SourceSystem {
+  ERP
+  MOBILE
+  WEBSITE
+  BOXES
+  MANUAL
+  GATEWAY
+}
+
+model Person {
+  id            String       @id @default(uuid())
+  personNumber  Int          @unique @default(autoincrement()) // human-readable internal number
+  fullName      String
+  shortName     String?
+  gender        Gender?
+  dateOfBirth   DateTime?
+  maritalStatus String?
+  nationality   String?
+  nationalId    String?      @unique // sensitive: crm.view_sensitive
+  occupation    String?
+  notes         String?
+  status        PersonStatus @default(ACTIVE)
+  sourceSystem  SourceSystem @default(ERP)
+  mergedIntoId  String?
+  createdBy     String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  mergedInto     Person?              @relation("PersonMerge", fields: [mergedIntoId], references: [id])
+  mergedPersons  Person[]             @relation("PersonMerge")
+  user           User?
+  personRoles    PersonRole[]
+  contacts       ContactInfo[]
+  addresses      Address[]
+  tags           PersonTag[]
+  relationsFrom  Relationship[]       @relation("RelFrom")
+  relationsTo    Relationship[]       @relation("RelTo")
+  identityLinks  PersonIdentityLink[]
+  timelineEvents TimelineEvent[]
+
+  @@index([fullName])
+  @@index([status])
+  @@map("persons")
+}
+
+/// A person may hold many concurrent roles (FRS-001 §9).
+enum PersonRoleType {
+  DONOR
+  SUBSCRIBER
+  BENEFICIARY
+  PATIENT
+  VOLUNTEER
+  EMPLOYEE
+  COLLECTOR
+  BOX_OWNER
+  PARTNER
+  SUPPLIER
+}
+
+model PersonRole {
+  id         String         @id @default(uuid())
+  personId   String
+  roleType   PersonRoleType
+  active     Boolean        @default(true)
+  assignedAt DateTime       @default(now())
+  assignedBy String?
+
+  person Person @relation(fields: [personId], references: [id])
+
+  @@unique([personId, roleType])
+  @@map("person_roles")
+}
+
+enum ContactType {
+  PHONE
+  SECONDARY_PHONE
+  EMAIL
+  WHATSAPP
+  TELEGRAM
+}
+
+model ContactInfo {
+  id        String      @id @default(uuid())
+  personId  String
+  type      ContactType
+  value     String // sensitive: crm.view_sensitive
+  isPrimary Boolean     @default(false)
+  verified  Boolean     @default(false)
+  createdAt DateTime    @default(now())
+
+  person Person @relation(fields: [personId], references: [id])
+
+  @@index([value]) // duplicate detection
+  @@index([personId])
+  @@map("contact_infos")
+}
+
+model Address {
+  id          String   @id @default(uuid())
+  personId    String
+  country     String   @default("Iraq")
+  governorate String?
+  city        String?
+  area        String?
+  addressLine String? // sensitive: crm.view_sensitive
+  latitude    Float?
+  longitude   Float?
+  isPrimary   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  person Person @relation(fields: [personId], references: [id])
+
+  @@index([personId])
+  @@index([governorate])
+  @@map("addresses")
+}
+
+model Tag {
+  id       String  @id @default(uuid())
+  name     String  @unique
+  category String?
+
+  persons PersonTag[]
+
+  @@map("tags")
+}
+
+model PersonTag {
+  personId String
+  tagId    String
+
+  person Person @relation(fields: [personId], references: [id])
+  tag    Tag    @relation(fields: [tagId], references: [id])
+
+  @@id([personId, tagId])
+  @@map("person_tags")
+}
+
+enum RelationshipType {
+  SPOUSE
+  PARENT
+  CHILD
+  SIBLING
+  GUARDIAN
+  SPONSOR
+  FAMILY
+  OTHER
+}
+
+model Relationship {
+  id              String           @id @default(uuid())
+  personId        String
+  relatedPersonId String
+  type            RelationshipType
+  notes           String?
+  createdAt       DateTime         @default(now())
+
+  person        Person @relation("RelFrom", fields: [personId], references: [id])
+  relatedPerson Person @relation("RelTo", fields: [relatedPersonId], references: [id])
+
+  @@unique([personId, relatedPersonId, type])
+  @@map("relationships")
+}
+
+/// Maps external system users to the single Person (Data Ownership Model §6).
+model PersonIdentityLink {
+  id             String       @id @default(uuid())
+  personId       String
+  sourceSystem   SourceSystem
+  externalUserId String
+  createdAt      DateTime     @default(now())
+  createdBy      String?
+
+  person Person @relation(fields: [personId], references: [id])
+
+  @@unique([sourceSystem, externalUserId])
+  @@index([personId])
+  @@map("person_identity_links")
+}
+
+/// Person timeline (FRS-001 §18). CRM-owned; other modules append via CrmTimelineService.
+model TimelineEvent {
+  id          String   @id @default(uuid())
+  personId    String
+  eventType   String // REGISTERED | PROFILE_UPDATED | ROLE_ASSIGNED | MERGED | DONATION | ...
+  module      String
+  title       String
+  description String?
+  entityType  String?
+  entityId    String?
+  metadata    Json?
+  occurredAt  DateTime @default(now())
+  createdBy   String?
+
+  person Person @relation(fields: [personId], references: [id])
+
+  @@index([personId, occurredAt])
+  @@map("timeline_events")
+}
+
+/// Reversible merge history (FRS-001 §19; Data Ownership Model §6).
+model MergeRecord {
+  id             String    @id @default(uuid())
+  primaryPersonId String
+  mergedPersonId  String
+  detail          Json // moved record ids per table, for reversal
+  performedBy     String
+  performedAt     DateTime  @default(now())
+  reversedBy      String?
+  reversedAt      DateTime?
+
+  @@index([primaryPersonId])
+  @@index([mergedPersonId])
+  @@map("merge_records")
+}
+
+// ─────────────────────────── storage (Phase 2) ───────────────────────────
+// Binaries live in MinIO/S3 only; PostgreSQL stores metadata (Art. 3.5).
+
+enum FileStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model StorageFolder {
+  id        String   @id @default(uuid())
+  name      String
+  parentId  String?
+  module    String?
+  createdAt DateTime @default(now())
+
+  parent   StorageFolder?  @relation("FolderTree", fields: [parentId], references: [id])
+  children StorageFolder[] @relation("FolderTree")
+  files    StoredFile[]
+
+  @@unique([parentId, name])
+  @@map("storage_folders")
+}
+
+model StoredFile {
+  id                String     @id @default(uuid())
+  folderId          String?
+  fileName          String
+  mimeType          String
+  sizeBytes         Int
+  bucket            String
+  objectKey         String     @unique
+  checksumSha256    String?
+  version           Int        @default(1)
+  previousVersionId String?    @unique
+  module            String?
+  status            FileStatus @default(ACTIVE)
+  uploadedBy        String?
+  createdAt         DateTime   @default(now())
+
+  folder          StorageFolder? @relation(fields: [folderId], references: [id])
+  previousVersion StoredFile?    @relation("FileVersions", fields: [previousVersionId], references: [id])
+  nextVersion     StoredFile?    @relation("FileVersions")
+  attachments     Attachment[]
+
+  @@index([module])
+  @@map("stored_files")
+}
+
+/// Links any stored file to any owning entity (person, donation, case, ...).
+model Attachment {
+  id         String   @id @default(uuid())
+  fileId     String
+  module     String
+  entityType String
+  entityId   String
+  attachedBy String?
+  createdAt  DateTime @default(now())
+
+  file StoredFile @relation(fields: [fileId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([fileId])
+  @@map("attachments")
+}
+
+// ─────────────────────────── finance (Phase 3) ───────────────────────────
+// Double-entry, immutable ledger (ADR-011). Base currency IQD; per-transaction
+// exchange rates (ADR-019). Approved transactions are never modified or deleted;
+// corrections are compensating transactions. Restricted funds are never mixed.
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+/// Chart of accounts (Financial Management spec).
+model Account {
+  id       String      @id @default(uuid())
+  code     String      @unique // e.g. "1000"
+  name     String
+  nameAr   String?
+  type     AccountType
+  parentId String?
+  isActive Boolean     @default(true)
+
+  parent   Account?      @relation("AccountTree", fields: [parentId], references: [id])
+  children Account[]     @relation("AccountTree")
+  entries  LedgerEntry[]
+
+  @@map("accounts")
+}
+
+enum FundType {
+  GENERAL
+  RESTRICTED
+}
+
+/// Financial funds (donations general, medical, orphans, ...). Restricted funds
+/// keep independent balances and are never mixed (Constitution Art. 5.3).
+model Fund {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  name        String
+  nameAr      String?
+  type        FundType @default(GENERAL)
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  transactions  FinancialTransaction[] @relation("TxFund")
+  transfersIn   FinancialTransaction[] @relation("TxToFund")
+  entries       LedgerEntry[]
+
+  @@map("funds")
+}
+
+model CostCenter {
+  id       String  @id @default(uuid())
+  code     String  @unique
+  name     String
+  nameAr   String?
+  parentId String?
+  isActive Boolean @default(true)
+
+  parent       CostCenter?            @relation("CostCenterTree", fields: [parentId], references: [id])
+  children     CostCenter[]           @relation("CostCenterTree")
+  transactions FinancialTransaction[]
+
+  @@map("cost_centers")
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+  REFUND
+}
+
+enum TransactionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  GATEWAY
+  POS
+  WALLET
+  OTHER
+}
+
+model FinancialTransaction {
+  id                String            @id @default(uuid())
+  transactionNumber Int               @unique @default(autoincrement())
+  type              TransactionType
+  status            TransactionStatus @default(PENDING)
+  description       String
+  transactionDate   DateTime          @default(now())
+
+  // Currency (ADR-019): base IQD; original amount + rate stored per transaction.
+  currency       String  @default("IQD")
+  amountOriginal Decimal @db.Decimal(18, 2)
+  exchangeRate   Decimal @default(1) @db.Decimal(18, 6)
+  amountIqd      Decimal @db.Decimal(18, 2)
+
+  fundId       String
+  toFundId     String? // TRANSFER only
+  costCenterId String?
+  personId     String? // payer / payee / donor (CRM reference, not ownership)
+
+  paymentMethod PaymentMethod @default(CASH)
+  reference     String?
+
+  // Provenance (Data Ownership Model §5)
+  sourceSystem   SourceSystem @default(ERP)
+  externalId     String?
+  idempotencyKey String?      @unique
+
+  // Cross-module linkage (campaign / case / subscription in later phases)
+  linkedEntityType String?
+  linkedEntityId   String?
+
+  reversesTransactionId String? @unique
+  rejectionReason       String?
+
+  createdBy  String
+  approvedBy String?
+  approvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  fund       Fund                   @relation("TxFund", fields: [fundId], references: [id])
+  toFund     Fund?                  @relation("TxToFund", fields: [toFundId], references: [id])
+  costCenter CostCenter?            @relation(fields: [costCenterId], references: [id])
+  reverses   FinancialTransaction?  @relation("TxReversal", fields: [reversesTransactionId], references: [id])
+  reversedBy FinancialTransaction?  @relation("TxReversal")
+  entries    LedgerEntry[]
+  receipt    Receipt?
+
+  @@unique([sourceSystem, externalId])
+  @@index([fundId, status])
+  @@index([type, status])
+  @@index([transactionDate])
+  @@index([linkedEntityType, linkedEntityId])
+  @@map("financial_transactions")
+}
+
+/// Append-only double-entry lines, always IQD. Created on approval; never
+/// updated or deleted (ADR-011).
+model LedgerEntry {
+  id            String   @id @default(uuid())
+  transactionId String
+  accountId     String
+  fundId        String
+  debitIqd      Decimal  @default(0) @db.Decimal(18, 2)
+  creditIqd     Decimal  @default(0) @db.Decimal(18, 2)
+  memo          String?
+  createdAt     DateTime @default(now())
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id])
+  account     Account              @relation(fields: [accountId], references: [id])
+  fund        Fund                 @relation(fields: [fundId], references: [id])
+
+  @@index([accountId])
+  @@index([fundId])
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+/// Amount-tiered approval rules (FRS-002/FRS-014). Config-driven (ADR-015).
+model ApprovalRule {
+  id                 String          @id @default(uuid())
+  transactionType    TransactionType
+  minAmountIqd       Decimal         @db.Decimal(18, 2)
+  requiredPermission String // e.g. "finance.approve", "finance.approve_executive"
+  description        String?
+  isActive           Boolean         @default(true)
+
+  @@index([transactionType, isActive])
+  @@map("approval_rules")
+}
+
+enum BudgetStatus {
+  ACTIVE
+  CLOSED
+}
+
+model Budget {
+  id           String       @id @default(uuid())
+  name         String
+  fundId       String?
+  costCenterId String?
+  periodStart  DateTime
+  periodEnd    DateTime
+  allocatedIqd Decimal      @db.Decimal(18, 2)
+  status       BudgetStatus @default(ACTIVE)
+  createdBy    String
+  createdAt    DateTime     @default(now())
+
+  @@index([costCenterId])
+  @@index([fundId])
+  @@map("budgets")
+}
+
+enum ReceiptType {
+  RECEIPT
+  PAYMENT_VOUCHER
+}
+
+model Receipt {
+  id            String      @id @default(uuid())
+  receiptNumber Int         @unique @default(autoincrement())
+  type          ReceiptType
+  transactionId String      @unique
+  pdfFileId     String? // StoredFile id (binaries in MinIO, Art. 3.5)
+  qrPayload     String
+  issuedBy      String
+  issuedAt      DateTime    @default(now())
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id])
+
+  @@map("receipts")
+}
+
+// ─────────────────────────── donations (Phase 4) ───────────────────────────
+// Every donation resolves to a Person (ADR-021). Every campaign owns a dedicated
+// RESTRICTED fund, so campaign money is structurally isolated (Art. 5.3):
+// donations post INCOME into the campaign fund; campaign expenses draw from it.
+
+enum CampaignType {
+  GENERAL
+  MEDICAL
+  ORPHANS
+  CONSTRUCTION
+  EDUCATION
+  RELIEF
+  SEASONAL
+  ZAKAT
+  KAFFARA
+  CUSTOM
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+  ARCHIVED
+}
+
+model Campaign {
+  id             String         @id @default(uuid())
+  campaignNumber Int            @unique @default(autoincrement())
+  name           String
+  nameAr         String?
+  description    String?
+  type           CampaignType   @default(GENERAL)
+  status         CampaignStatus @default(DRAFT)
+  goalAmountIqd  Decimal?       @db.Decimal(18, 2)
+  targetBeneficiaries Int?
+  startDate      DateTime?
+  endDate        DateTime?
+  fundId         String         @unique // dedicated RESTRICTED fund
+  managerId      String?
+  coverImageFileId String?
+  showInApp      Boolean        @default(false)
+  showInWebsite  Boolean        @default(false)
+  createdBy      String
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  updates   CampaignUpdate[]
+  donations Donation[]
+
+  @@index([status])
+  @@index([type])
+  @@map("campaigns")
+}
+
+model CampaignUpdate {
+  id          String   @id @default(uuid())
+  campaignId  String
+  title       String
+  body        String
+  imageFileId String?
+  publishedAt DateTime @default(now())
+  createdBy   String
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@index([campaignId, publishedAt])
+  @@map("campaign_updates")
+}
+
+enum DonationStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+model Donation {
+  id             String         @id @default(uuid())
+  donationNumber Int            @unique @default(autoincrement())
+  personId       String // NEVER null (ADR-021)
+  campaignId     String?
+  fundId         String // target fund (campaign fund or general/other fund)
+  status         DonationStatus @default(COMPLETED)
+
+  currency       String  @default("IQD")
+  amountOriginal Decimal @db.Decimal(18, 2)
+  exchangeRate   Decimal @default(1) @db.Decimal(18, 6)
+  amountIqd      Decimal @db.Decimal(18, 2)
+
+  paymentMethod     PaymentMethod @default(CASH)
+  donationDate      DateTime      @default(now())
+  isAnonymousPublic Boolean       @default(false)
+  notes             String?
+
+  // Financial linkage (Phase 3): the INCOME transaction; refund tx when refunded.
+  transactionId       String? @unique
+  refundTransactionId String? @unique
+
+  // Provenance (Art. 4.3)
+  sourceSystem   SourceSystem @default(ERP)
+  externalId     String?
+  idempotencyKey String?      @unique
+
+  recurringDonationId String?
+  createdBy           String
+  createdAt           DateTime @default(now())
+
+  campaign  Campaign?          @relation(fields: [campaignId], references: [id])
+  recurring RecurringDonation? @relation(fields: [recurringDonationId], references: [id])
+
+  @@unique([sourceSystem, externalId])
+  @@index([personId])
+  @@index([campaignId, status])
+  @@index([fundId, status])
+  @@index([donationDate])
+  @@map("donations")
+}
+
+enum RecurrenceFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum RecurringStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+  COMPLETED
+}
+
+model RecurringDonation {
+  id         String              @id @default(uuid())
+  personId   String
+  campaignId String?
+  fundId     String
+  frequency  RecurrenceFrequency
+  status     RecurringStatus     @default(ACTIVE)
+
+  currency       String  @default("IQD")
+  amountOriginal Decimal @db.Decimal(18, 2)
+
+  paymentMethod PaymentMethod @default(CASH)
+  startDate     DateTime      @default(now())
+  nextRunAt     DateTime
+  endDate       DateTime?
+  createdBy     String
+  createdAt     DateTime      @default(now())
+
+  donations Donation[]
+
+  @@index([status, nextRunAt])
+  @@index([personId])
+  @@map("recurring_donations")
+}
+
+// ──────────────────────── subscriptions (Phase 5A) ────────────────────────
+// FRS-004: a subscription is a long-term recurring commitment (not a donation).
+// Every subscription resolves to a Person; every paid installment posts an
+// INCOME transaction to the ledger (subscriptions revenue).
+
+enum PlanCategory {
+  BAQIYAT
+  ORPHAN_SPONSORSHIP
+  STUDENT_SPONSORSHIP
+  PATIENT_SUPPORT
+  PROJECT_SUPPORT
+  WAQF
+  GENERAL
+  CUSTOM
+}
+
+enum BillingCycle {
+  MONTHLY
+  BIMONTHLY
+  QUARTERLY
+  SEMIANNUAL
+  YEARLY
+  LIFETIME
+}
+
+model SubscriptionPlan {
+  id               String       @id @default(uuid())
+  code             String       @unique
+  name             String
+  nameAr           String?
+  description      String?
+  category         PlanCategory @default(GENERAL)
+  billingCycle     BillingCycle
+  amountIqd        Decimal      @db.Decimal(18, 2)
+  allowCustomAmount Boolean     @default(false)
+  gracePeriodDays  Int          @default(14)
+  fundId           String? // target fund; GENERAL when null
+  imageFileId      String?
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([category, isActive])
+  @@map("subscription_plans")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAUSED
+  LAPSED
+  EXPIRED
+  CANCELLED
+}
+
+model Subscription {
+  id                 String             @id @default(uuid())
+  subscriptionNumber Int                @unique @default(autoincrement())
+  personId           String // never null (Art. 4.2)
+  planId             String
+  status             SubscriptionStatus @default(ACTIVE)
+  amountIqd          Decimal            @db.Decimal(18, 2) // plan amount or custom
+  startDate          DateTime           @default(now())
+  nextDueDate        DateTime?
+  endDate            DateTime?
+  autoRenew          Boolean            @default(true)
+  beneficiaryPersonId String? // sponsorships (kafala)
+  notes              String?
+
+  // Provenance (Art. 4.3)
+  sourceSystem   SourceSystem @default(ERP)
+  externalId     String?
+  idempotencyKey String?      @unique
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  plan         SubscriptionPlan        @relation(fields: [planId], references: [id])
+  installments Installment[]
+  works        BaqiyatWorkAssignment[]
+
+  @@unique([sourceSystem, externalId])
+  @@index([personId])
+  @@index([status, nextDueDate])
+  @@index([planId])
+  @@map("subscriptions")
+}
+
+enum InstallmentStatus {
+  DUE
+  PAID
+  OVERDUE
+  WAIVED
+  CANCELLED
+}
+
+model Installment {
+  id             String            @id @default(uuid())
+  subscriptionId String
+  sequence       Int
+  amountIqd      Decimal           @db.Decimal(18, 2)
+  dueDate        DateTime
+  status         InstallmentStatus @default(DUE)
+  paidAt         DateTime?
+  paymentMethod  PaymentMethod?
+  reference      String?
+  transactionId  String?           @unique // finance INCOME transaction
+  remindersSent  Json? // e.g. ["D-7","D-3","D0","O+7","O+30"]
+  notes          String?
+  createdAt      DateTime          @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@unique([subscriptionId, sequence])
+  @@index([status, dueDate])
+  @@map("installments")
+}
+
+// Baqiyat Al-Salihat executed works (FRS-004): khatmas, sadaqa, feeding,
+// majalis, charity projects — linkable to one or more subscriptions.
+
+enum BaqiyatWorkType {
+  KHATMA
+  SADAQA
+  FEEDING
+  MAJLIS
+  CHARITY_PROJECT
+  OTHER
+}
+
+enum BaqiyatWorkStatus {
+  SCHEDULED
+  EXECUTED
+  POSTPONED
+  CANCELLED
+}
+
+model BaqiyatWork {
+  id          String            @id @default(uuid())
+  workNumber  Int               @unique @default(autoincrement())
+  type        BaqiyatWorkType
+  status      BaqiyatWorkStatus @default(SCHEDULED)
+  title       String
+  description String?
+  scheduledAt DateTime?
+  executedAt  DateTime?
+  executedBy  String?
+  createdBy   String
+  createdAt   DateTime          @default(now())
+
+  assignments BaqiyatWorkAssignment[]
+
+  @@index([status, type])
+  @@map("baqiyat_works")
+}
+
+model BaqiyatWorkAssignment {
+  workId         String
+  subscriptionId String
+  assignedAt     DateTime @default(now())
+  assignedBy     String?
+
+  work         BaqiyatWork  @relation(fields: [workId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@id([workId, subscriptionId])
+  @@map("baqiyat_work_assignments")
+}
+
+// ───────────────────────── workflow (Phase 6, ADR-015) ─────────────────────────
+// Config-driven approval chains: definitions describe steps; instances track a
+// single entity's journey; actions are the immutable history (Art. 7.2).
+
+enum WorkflowInstanceStatus {
+  IN_PROGRESS
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum WorkflowActionType {
+  APPROVE
+  REJECT
+  RETURN
+  COMMENT
+  CANCEL
+}
+
+model WorkflowDefinition {
+  key         String  @id // e.g. "medical_case_review"
+  name        String
+  module      String
+  entityType  String
+  description String?
+  isActive    Boolean @default(true)
+
+  steps     WorkflowStepDef[]
+  instances WorkflowInstance[]
+
+  @@map("workflow_definitions")
+}
+
+model WorkflowStepDef {
+  id                   String  @id @default(uuid())
+  definitionKey        String
+  sequence             Int
+  name                 String
+  requiredPermission   String // holder may act on this step
+  slaHours             Int?
+  escalationPermission String?
+
+  definition WorkflowDefinition @relation(fields: [definitionKey], references: [key])
+
+  @@unique([definitionKey, sequence])
+  @@map("workflow_step_defs")
+}
+
+model WorkflowInstance {
+  id                  String                 @id @default(uuid())
+  definitionKey       String
+  entityType          String
+  entityId            String
+  status              WorkflowInstanceStatus @default(IN_PROGRESS)
+  currentStepSequence Int                    @default(1)
+  startedBy           String
+  startedAt           DateTime               @default(now())
+  completedAt         DateTime?
+
+  definition WorkflowDefinition @relation(fields: [definitionKey], references: [key])
+  actions    WorkflowAction[]
+
+  @@unique([definitionKey, entityType, entityId]) // one live workflow per entity+definition
+  @@index([status, currentStepSequence])
+  @@map("workflow_instances")
+}
+
+model WorkflowAction {
+  id           String             @id @default(uuid())
+  instanceId   String
+  stepSequence Int
+  action       WorkflowActionType
+  actorId      String
+  comment      String?
+  createdAt    DateTime           @default(now())
+
+  instance WorkflowInstance @relation(fields: [instanceId], references: [id])
+
+  @@index([instanceId])
+  @@map("workflow_actions")
+}
+
+// ─────────────────────────── medical (Phase 6) ───────────────────────────
+// FRS-006: every case is a complete file — patient, requests, documents (via
+// attachments), funding (via linked financial transactions), decisions
+// (via workflow), treatments. Cases are never deleted.
+
+enum MedicalCaseType {
+  SURGERY
+  TREATMENT
+  MEDICATION
+  EQUIPMENT
+  TESTS
+  PHYSIOTHERAPY
+  OTHER
+}
+
+enum CasePriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum MedicalCaseStatus {
+  NEW
+  UNDER_REVIEW
+  AWAITING_DOCUMENTS
+  APPROVED
+  FUNDING
+  IN_TREATMENT
+  COMPLETED
+  REJECTED
+  CLOSED
+}
+
+model MedicalCase {
+  id                 String            @id @default(uuid())
+  caseNumber         Int               @unique @default(autoincrement())
+  patientPersonId    String // CRM reference (PATIENT role)
+  type               MedicalCaseType
+  priority           CasePriority      @default(MEDIUM)
+  status             MedicalCaseStatus @default(NEW)
+  diagnosis          String?
+  hospital           String?
+  doctorName         String?
+  requiredAmountIqd  Decimal?          @db.Decimal(18, 2)
+  campaignId         String? // optional dedicated case campaign
+  assignedOfficerId  String?
+  workflowInstanceId String?           @unique
+  rejectionReason    String?
+  closedAt           DateTime?
+
+  sourceSystem   SourceSystem @default(ERP)
+  externalId     String?
+  idempotencyKey String?      @unique
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  treatments MedicalTreatment[]
+
+  @@unique([sourceSystem, externalId])
+  @@index([patientPersonId])
+  @@index([status, priority])
+  @@map("medical_cases")
+}
+
+model MedicalTreatment {
+  id            String   @id @default(uuid())
+  caseId        String
+  type          String // surgery / medication / session / test / ...
+  description   String
+  treatmentDate DateTime @default(now())
+  costIqd       Decimal? @db.Decimal(18, 2)
+  transactionId String?  @unique // finance EXPENSE when cost recorded
+  recordedBy    String
+  createdAt     DateTime @default(now())
+
+  case MedicalCase @relation(fields: [caseId], references: [id])
+
+  @@index([caseId])
+  @@map("medical_treatments")
+}
+
+// ─────────────────────────── projects (Phase 6) ───────────────────────────
+// FRS-007: Program → Project → Activity → Task; participants, attendance,
+// certificates. Every entity keeps its full history (Art. 4.4).
+
+enum ProgramStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Program {
+  id        String        @id @default(uuid())
+  code      String        @unique
+  name      String
+  nameAr    String?
+  managerId String?
+  status    ProgramStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+
+  projects Project[]
+
+  @@map("programs")
+}
+
+enum ProjectStatus {
+  PLANNING
+  PENDING_APPROVAL
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+  ARCHIVED
+}
+
+model Project {
+  id            String        @id @default(uuid())
+  projectNumber Int           @unique @default(autoincrement())
+  programId     String?
+  name          String
+  nameAr        String?
+  category      String?
+  description   String?
+  location      String?
+  startDate     DateTime?
+  endDate       DateTime?
+  status        ProjectStatus @default(PLANNING)
+  managerId     String?
+  budgetIqd     Decimal?      @db.Decimal(18, 2)
+  createdBy     String
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  program      Program?           @relation(fields: [programId], references: [id])
+  activities   Activity[]
+  tasks        ProjectTask[]
+  participants Participant[]
+  certificates Certificate[]
+
+  @@index([status])
+  @@index([programId])
+  @@map("projects")
+}
+
+enum ActivityType {
+  GENERAL
+  LECTURE
+  WORKSHOP
+  TRIP
+  COMPETITION
+  EVENT
+  COURSE
+  CAMP
+  MEETING
+}
+
+model Activity {
+  id           String       @id @default(uuid())
+  projectId    String
+  name         String
+  type         ActivityType @default(GENERAL)
+  scheduledAt  DateTime?
+  location     String?
+  notes        String?
+  createdBy    String
+  createdAt    DateTime     @default(now())
+
+  project    Project            @relation(fields: [projectId], references: [id])
+  attendance AttendanceRecord[]
+
+  @@index([projectId])
+  @@map("activities")
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model ProjectTask {
+  id                 String       @id @default(uuid())
+  projectId          String
+  title              String
+  assignedToPersonId String?
+  priority           TaskPriority @default(MEDIUM)
+  status             TaskStatus   @default(TODO)
+  dueDate            DateTime?
+  completedAt        DateTime?
+  notes              String?
+  createdBy          String
+  createdAt          DateTime     @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId, status])
+  @@index([assignedToPersonId])
+  @@map("project_tasks")
+}
+
+enum ParticipantRole {
+  PARTICIPANT
+  VOLUNTEER
+  ORGANIZER
+  TRAINER
+  GUEST
+}
+
+model Participant {
+  id           String          @id @default(uuid())
+  projectId    String
+  personId     String
+  role         ParticipantRole @default(PARTICIPANT)
+  registeredAt DateTime        @default(now())
+  registeredBy String?
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, personId])
+  @@index([personId])
+  @@map("participants")
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  WITHDRAWN
+}
+
+model AttendanceRecord {
+  id         String           @id @default(uuid())
+  activityId String
+  personId   String
+  status     AttendanceStatus
+  recordedBy String
+  recordedAt DateTime         @default(now())
+
+  activity Activity @relation(fields: [activityId], references: [id])
+
+  @@unique([activityId, personId])
+  @@map("attendance_records")
+}
+
+model Certificate {
+  id                String   @id @default(uuid())
+  certificateNumber Int      @unique @default(autoincrement())
+  personId          String
+  projectId         String?
+  title             String
+  titleAr           String?
+  verificationCode  String   @unique // QR verification (public check)
+  pdfFileId         String?
+  issuedBy          String
+  issuedAt          DateTime @default(now())
+
+  project Project? @relation(fields: [projectId], references: [id])
+
+  @@index([personId])
+  @@map("certificates")
+}
+
+// ─────────────────────────── volunteers (Phase 6) ───────────────────────────
+// FRS-008 (volunteers scope; employees/HR deferred). Profiles layer on Person.
+
+enum VolunteerStatus {
+  APPLICANT
+  REVIEW
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+  ARCHIVED
+}
+
+model VolunteerProfile {
+  id                 String          @id @default(uuid())
+  personId           String          @unique
+  status             VolunteerStatus @default(APPLICANT)
+  skills             String[]
+  interests          String?
+  availability       String?
+  emergencyContact   String?
+  joinDate           DateTime?
+  workflowInstanceId String?         @unique // recruitment workflow
+  createdBy          String
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  teams TeamMember[]
+  hours VolunteerHours[]
+  evaluations VolunteerEvaluation[]
+
+  @@index([status])
+  @@map("volunteer_profiles")
+}
+
+model Team {
+  id             String  @id @default(uuid())
+  code           String  @unique
+  name           String
+  nameAr         String?
+  department     String?
+  leaderPersonId String?
+  isActive       Boolean @default(true)
+
+  members TeamMember[]
+
+  @@map("teams")
+}
+
+model TeamMember {
+  teamId      String
+  volunteerId String
+  joinedAt    DateTime @default(now())
+  addedBy     String?
+
+  team      Team             @relation(fields: [teamId], references: [id])
+  volunteer VolunteerProfile @relation(fields: [volunteerId], references: [id])
+
+  @@id([teamId, volunteerId])
+  @@map("team_members")
+}
+
+enum HoursStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model VolunteerHours {
+  id          String      @id @default(uuid())
+  volunteerId String
+  projectId   String?
+  workDate    DateTime
+  hours       Decimal     @db.Decimal(6, 2)
+  description String?
+  status      HoursStatus @default(PENDING)
+  approvedBy  String?
+  approvedAt  DateTime?
+  createdBy   String
+  createdAt   DateTime    @default(now())
+
+  volunteer VolunteerProfile @relation(fields: [volunteerId], references: [id])
+
+  @@index([volunteerId, status])
+  @@map("volunteer_hours")
+}
+
+model VolunteerEvaluation {
+  id          String   @id @default(uuid())
+  volunteerId String
+  period      String? // e.g. "2026-Q2" or a project reference
+  scores      Json // { commitment, attendance, quality, cooperation, initiative }
+  comments    String?
+  evaluatedBy String
+  createdAt   DateTime @default(now())
+
+  volunteer VolunteerProfile @relation(fields: [volunteerId], references: [id])
+
+  @@index([volunteerId])
+  @@map("volunteer_evaluations")
+}
+
+// ───────────────────────── notification (Phase 2) ─────────────────────────
+
+enum NotificationChannel {
+  PUSH
+  EMAIL
+  SMS
+  IN_APP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+model NotificationTemplate {
+  key       String              @id // e.g. "welcome_email"
+  channel   NotificationChannel
+  locale    String              @default("ar")
+  subject   String?
+  body      String // {{placeholder}} syntax
+  active    Boolean             @default(true)
+  updatedBy String?
+  updatedAt DateTime            @updatedAt
+
+  @@map("notification_templates")
+}
+
+model NotificationRecord {
+  id                String              @id @default(uuid())
+  channel           NotificationChannel
+  recipientUserId   String?
+  recipientPersonId String?
+  recipientAddress  String? // email address / phone / fcm token, channel-dependent
+  templateKey       String?
+  title             String
+  body              String
+  data              Json?
+  status            NotificationStatus  @default(QUEUED)
+  error             String?
+  scheduledAt       DateTime?
+  sentAt            DateTime?
+  createdBy         String?
+  createdAt         DateTime            @default(now())
+
+  deliveryLogs DeliveryLog[]
+
+  @@index([recipientUserId, status])
+  @@index([status])
+  @@map("notification_records")
+}
+
+model DeliveryLog {
+  id               String   @id @default(uuid())
+  notificationId   String
+  attempt          Int
+  status           String // SENT | FAILED
+  providerName     String
+  providerResponse String?
+  createdAt        DateTime @default(now())
+
+  notification NotificationRecord @relation(fields: [notificationId], references: [id])
+
+  @@index([notificationId])
+  @@map("delivery_logs")
+}
+
+// ─────────────────────────── cms (Phase 7, FRS-010) ───────────────────────────
+// Everything a user sees is manageable from the ERP without code changes.
+// Rules: soft-delete/archive only (Art. 4.4); every version kept (revision
+// history); binaries in MinIO via StoredFile ids only (Art. 3.5).
+
+enum ContentType {
+  PAGE
+  NEWS
+  ARTICLE
+}
+
+enum ContentStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  PUBLISHED
+  UNPUBLISHED
+  ARCHIVED
+}
+
+model ContentCategory {
+  id        String   @id @default(uuid())
+  name      String
+  nameAr    String?
+  slug      String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  items ContentItem[]
+
+  @@map("content_categories")
+}
+
+model ContentItem {
+  id                  String        @id @default(uuid())
+  type                ContentType
+  title               String
+  slug                String
+  summary             String?
+  body                String        @default("")
+  featuredImageFileId String? // StoredFile id (Art. 3.5)
+  categoryId          String?
+  tags                String[]      @default([])
+  locale              String        @default("ar")
+  status              ContentStatus @default(DRAFT)
+  // Delivery channels (Hub Model: app/website consume ERP-published content)
+  showInApp           Boolean       @default(false)
+  showInWebsite       Boolean       @default(true)
+  // Publishing
+  publishAt           DateTime? // future date = scheduled publish
+  publishedAt         DateTime?
+  unpublishedAt       DateTime?
+  // SEO (FRS-010)
+  metaTitle           String?
+  metaDescription     String?
+  metaKeywords        String[]      @default([])
+  ogImageFileId       String?
+  // Authorship & versioning
+  version             Int           @default(1)
+  authorId            String // creator user id
+  reviewedBy          String?
+  publishedBy         String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  category  ContentCategory?  @relation(fields: [categoryId], references: [id])
+  revisions ContentRevision[]
+
+  @@unique([type, slug])
+  @@index([type, status])
+  @@index([status, publishAt])
+  @@map("content_items")
+}
+
+/// Immutable snapshot per version — "يحفظ جميع الإصدارات ويدعم الاسترجاع".
+model ContentRevision {
+  id        String   @id @default(uuid())
+  contentId String
+  version   Int
+  snapshot  Json // full content fields at this version
+  editedBy  String
+  createdAt DateTime @default(now())
+
+  content ContentItem @relation(fields: [contentId], references: [id])
+
+  @@unique([contentId, version])
+  @@map("content_revisions")
+}
+
+enum BannerPlacement {
+  WEBSITE
+  APP
+  CAMPAIGN
+  EVENT
+}
+
+model Banner {
+  id          String          @id @default(uuid())
+  title       String
+  imageFileId String // StoredFile id
+  linkUrl     String?
+  placement   BannerPlacement @default(WEBSITE)
+  startDate   DateTime?
+  endDate     DateTime?
+  priority    Int             @default(0)
+  active      Boolean         @default(true)
+  archived    Boolean         @default(false)
+  createdBy   String
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([placement, active])
+  @@map("banners")
+}
+
+model Popup {
+  id          String    @id @default(uuid())
+  title       String
+  body        String?
+  imageFileId String?
+  linkUrl     String?
+  showInApp   Boolean   @default(true)
+  showInWebsite Boolean @default(true)
+  startAt     DateTime?
+  endAt       DateTime?
+  active      Boolean   @default(true)
+  archived    Boolean   @default(false)
+  createdBy   String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("popups")
+}
+
+model Menu {
+  id     String  @id @default(uuid())
+  key    String  @unique // main | side | footer | ...
+  title  String
+  active Boolean @default(true)
+
+  items MenuItem[]
+
+  @@map("menus")
+}
+
+model MenuItem {
+  id        String  @id @default(uuid())
+  menuId    String
+  parentId  String?
+  label     String
+  labelAr   String?
+  url       String? // external/relative URL …
+  contentId String? // … or a CMS content item
+  order     Int     @default(0)
+  active    Boolean @default(true)
+
+  menu     Menu       @relation(fields: [menuId], references: [id])
+  parent   MenuItem?  @relation("MenuItemChildren", fields: [parentId], references: [id])
+  children MenuItem[] @relation("MenuItemChildren")
+
+  @@index([menuId, order])
+  @@map("menu_items")
+}
+
+/// Which campaigns appear on public channels and in what order (FRS-010).
+model FeaturedCampaign {
+  id         String   @id @default(uuid())
+  campaignId String   @unique
+  order      Int      @default(0)
+  visible    Boolean  @default(true)
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  @@index([visible, order])
+  @@map("featured_campaigns")
+}
+
+// ──────────────── communication center (Phase 7, FRS-009) ────────────────
+// Bulk/audience messaging on top of the central notification engine.
+// Fan-out runs in BullMQ (Art. 9.4); per-recipient deliveries are regular
+// notification_records, so tracking/metrics reuse delivery logs.
+
+enum AudienceType {
+  ALL_USERS
+  ROLE
+  DONORS
+  VOLUNTEERS
+  SUBSCRIBERS
+}
+
+enum CommCampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+model CommunicationCampaign {
+  id             String              @id @default(uuid())
+  name           String
+  channel        NotificationChannel
+  templateKey    String?
+  title          String
+  body           String
+  data           Json?
+  audienceType   AudienceType
+  audienceFilter Json? // e.g. { "roleName": "..." } for ROLE
+  status         CommCampaignStatus  @default(DRAFT)
+  scheduledAt    DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  totalRecipients Int                @default(0)
+  totalSent      Int                 @default(0)
+  totalFailed    Int                 @default(0)
+  createdBy      String
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@index([status])
+  @@map("communication_campaigns")
+}
+
+// ─────────────────── analytics (Phase 8, FRS-013) ───────────────────
+// KPI engine + executive dashboard read models. Analytics is a read-only
+// aggregation module: raw SQL over reporting views is permitted (Art. 2,
+// ADR-009); it never writes to other modules' tables.
+
+enum SnapshotScope {
+  EXECUTIVE
+  FINANCIAL
+  CAMPAIGNS
+  SUBSCRIPTIONS
+  PROJECTS
+  MEDICAL
+  HR
+}
+
+/// Daily KPI snapshots captured by the analytics scheduler: powers trends,
+/// growth rates and "as-of" history without recomputing over the full ledger.
+model KpiSnapshot {
+  id           String        @id @default(uuid())
+  scope        SnapshotScope
+  snapshotDate DateTime      @db.Date
+  payload      Json
+  generatedAt  DateTime      @default(now())
+
+  @@unique([scope, snapshotDate])
+  @@index([scope, snapshotDate])
+  @@map("kpi_snapshots")
+}
+
+/// Internal announcements shown to staff/users in-app (FRS-009).
+model Announcement {
+  id        String    @id @default(uuid())
+  title     String
+  body      String
+  audience  AudienceType @default(ALL_USERS)
+  startAt   DateTime?
+  endAt     DateTime?
+  active    Boolean   @default(true)
+  archived  Boolean   @default(false)
+  createdBy String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([active])
+  @@map("announcements")
+}

@@ -1,0 +1,13 @@
+# Amal ERP — VPS crontab (Constitution Art. 9.2). Install with: crontab -e
+# Times are server-local; keep backups outside peak hours.
+
+# PostgreSQL backups (daily / weekly / monthly rotation)
+15 2 * * *   /opt/amal/erp-core/ops/backup/pg_backup.sh daily   >> /var/log/amal-backup.log 2>&1
+30 2 * * 0   /opt/amal/erp-core/ops/backup/pg_backup.sh weekly  >> /var/log/amal-backup.log 2>&1
+45 2 1 * *   /opt/amal/erp-core/ops/backup/pg_backup.sh monthly >> /var/log/amal-backup.log 2>&1
+
+# Object storage (MinIO) mirror
+0 3 * * *    /opt/amal/erp-core/ops/backup/minio_backup.sh      >> /var/log/amal-backup.log 2>&1
+
+# Scheduled restore test (Art. 9.2: untested backups are not backups)
+0 4 * * 0    /opt/amal/erp-core/ops/backup/pg_restore_test.sh   >> /var/log/amal-restore-test.log 2>&1
