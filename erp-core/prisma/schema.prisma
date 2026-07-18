@@ -1828,6 +1828,116 @@ model KpiSnapshot {
   @@map("kpi_snapshots")
 }
 
+// ─────────────── boxes (ADR-027, FRS-005): requests → boxes → collections ───────────────
+// Boxes operations are ERP-owned (ADR-027 supersedes ADR-002 partially).
+// Request lifecycle is a full state machine; DELIVERED transactionally creates
+// the CollectionBox. Collections post INCOME to the ledger (account 4200).
+
+enum BoxRequestStatus {
+  NEW
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  ASSIGNED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+model BoxRequest {
+  id            String           @id @default(uuid())
+  requestNumber Int              @unique @default(autoincrement())
+  personId      String // owner-to-be (Art. 4.2 — always a Person)
+  governorate   String?
+  district      String?
+  addressDetails String?
+  preferredContactTime String?
+  notes         String?
+  status        BoxRequestStatus @default(NEW)
+  reviewedBy    String?
+  rejectionReason String?
+  assignedToUserId String? // delivery staff
+  scheduledDeliveryAt DateTime?
+  deliveredBy   String?
+  deliveredAt   DateTime?
+  boxId         String?          @unique // created on DELIVERED
+
+  // Provenance (Art. 4.3) — requests arrive from app/website via integration
+  sourceSystem   SourceSystem @default(ERP)
+  externalId     String?
+  idempotencyKey String?      @unique
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  box CollectionBox? @relation(fields: [boxId], references: [id])
+
+  @@unique([sourceSystem, externalId])
+  @@index([status])
+  @@index([personId])
+  @@map("box_requests")
+}
+
+enum BoxStatus {
+  ACTIVE
+  INACTIVE
+  LOST
+  DAMAGED
+  RETURNED
+}
+
+model CollectionBox {
+  id            String    @id @default(uuid())
+  boxNumber     Int       @unique @default(autoincrement())
+  code          String    @unique // printed / QR code
+  ownerPersonId String
+  governorate   String?
+  district      String?
+  addressDetails String?
+  collectorPersonId String? // assigned collector (CRM Person with COLLECTOR role)
+  status        BoxStatus @default(ACTIVE)
+  deliveredAt   DateTime?
+  notes         String?
+  createdBy     String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  request     BoxRequest?
+  collections BoxCollection[]
+
+  @@index([status])
+  @@index([ownerPersonId])
+  @@index([collectorPersonId])
+  @@map("collection_boxes")
+}
+
+/// A collected amount from a box. Posts INCOME to the ledger (never edited;
+/// corrections via finance reversals — ADR-011).
+model BoxCollection {
+  id               String   @id @default(uuid())
+  collectionNumber Int      @unique @default(autoincrement())
+  boxId            String
+  amountIqd        Decimal  @db.Decimal(18, 2)
+  collectedAt      DateTime @default(now())
+  collectorUserId  String? // integration account / staff who recorded it
+  notes            String?
+  transactionId    String?  @unique // INCOME ledger transaction
+
+  sourceSystem   SourceSystem @default(ERP)
+  externalId     String?
+  idempotencyKey String?      @unique
+
+  createdBy String
+  createdAt DateTime @default(now())
+
+  box CollectionBox @relation(fields: [boxId], references: [id])
+
+  @@unique([sourceSystem, externalId])
+  @@index([boxId, collectedAt])
+  @@map("box_collections")
+}
+
 /// Internal announcements shown to staff/users in-app (FRS-009).
 model Announcement {
   id        String    @id @default(uuid())

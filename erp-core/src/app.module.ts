@@ -21,6 +21,7 @@ import { VolunteersModule } from './modules/volunteers/volunteers.module';
 import { CmsModule } from './modules/cms/cms.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { MonitoringModule } from './modules/monitoring/monitoring.module';
+import { BoxesModule } from './modules/boxes/boxes.module';
 import { CommunicationModule } from './modules/communication/communication.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { NotificationModule } from './modules/notification/notification.module';
@@ -84,6 +85,8 @@ function redisConnection(config: ConfigService): { host: string; port: number; p
     AnalyticsModule,
     // Production hardening - operational monitoring (Art. 9.3)
     MonitoringModule,
+    // ADR-027 - Boxes operations inside the ERP (requests → boxes → collections)
+    BoxesModule,
   ],
   providers: [
     // Order matters: throttling → authentication → authorization

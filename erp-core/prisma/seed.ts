@@ -89,6 +89,11 @@ const PERMISSIONS: Array<{ module: string; action: string; description: string }
   { module: 'analytics', action: 'export', description: 'Run custom date-range reports and exports' },
   // Production hardening - monitoring
   { module: 'monitoring', action: 'view', description: 'View queue health, database latency and process metrics' },
+  // ADR-027 - boxes operations
+  { module: 'boxes', action: 'view', description: 'View box requests, boxes and collections' },
+  { module: 'boxes', action: 'manage', description: 'Create/review/assign box requests; manage box statuses' },
+  { module: 'boxes', action: 'deliver', description: 'Deliver boxes (transactionally creates the box record)' },
+  { module: 'boxes', action: 'collect', description: 'Record box collections (posts income to the ledger)' },
 ];
 
 async function main(): Promise<void> {

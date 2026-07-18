@@ -14,6 +14,7 @@ Governance: see `../07_GOVERNANCE/` — the ERP Implementation Constitution is m
 **Phase 7 — CMS & Communication Center: complete.**
 **Phase 8 — Analytics & Executive Dashboard: complete.**
 **Production hardening (security, monitoring, backups, CI): complete — see `../08_OPERATIONS/`.**
+**ADR-027 slice 1 — Boxes operations (requests state machine → transactional delivery → boxes → ledger-posted collections): complete.**
 
 | Module | Contents |
 |---|---|
@@ -84,7 +85,18 @@ scope filters, storage object keys/upload safety, template renderer.
 `projects.view|manage|manage_participants|manage_tasks|issue_certificates` ·
 `volunteers.view|manage|review|approve|approve_hours` ·
 `cms.view|manage|review|publish` · `communication.view|manage|send` ·
-`analytics.view|manage|export` · `monitoring.view`
+`analytics.view|manage|export` · `monitoring.view` ·
+`boxes.view|manage|deliver|collect`
+
+## Boxes API (ADR-027)
+
+`boxes/summary` · `boxes/requests` (create/list) · `requests/:id/transition`
+(NEW→UNDER_REVIEW→APPROVED/REJECTED→ASSIGNED→OUT_FOR_DELIVERY) ·
+`requests/:id/deliver` (**one DB transaction**: request DELIVERED + CollectionBox
+created + linked) · `boxes` (list w/ totals) · `:id/status` ·
+`:id/collections` (record → INCOME posted cash 1000 → revenue 4200; idempotent
+for the collectors app) — tables: `box_requests`, `collection_boxes`,
+`box_collections` (migration 8).
 
 ## Rules enforced by design (Constitution references)
 
